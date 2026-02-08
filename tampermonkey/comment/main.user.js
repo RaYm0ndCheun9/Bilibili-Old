@@ -839,7 +839,7 @@ var PreviewImage = class extends HTMLElement {
     document.body.style.overflow = "hidden";
   }
 };
-customElements.get(`preview-image-${"9cu2wmojyc"}`) || customElements.define(`preview-image-${"9cu2wmojyc"}`, PreviewImage);
+customElements.get(`preview-image-${"b07bqg3eox5"}`) || customElements.define(`preview-image-${"b07bqg3eox5"}`, PreviewImage);
 
 // src/core/comment.ts
 var Feedback;

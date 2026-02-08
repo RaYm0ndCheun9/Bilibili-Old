@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 旧播放页
 // @namespace    MotooriKashin
-// @version      10.8.7-a31dc13f64b0b5a3afd202adb18cdd8cdd0dcc36
+// @version      10.8.8-a31dc13f64b0b5a3afd202adb18cdd8cdd0dcc36
 // @description  恢复Bilibili旧版页面，为了那些念旧的人。
 // @author       MotooriKashin, wly5556
 // @homepage     https://github.com/MotooriKashin/Bilibili-Old
@@ -36862,31 +36862,6 @@ const MODULES = `
     };
   };
 
-  // src/io/api-season-section.ts
-  init_tampermonkey();
-  var ApiSeasonSection = class {
-    fetch;
-    constructor(season_id) {
-      this.fetch = fetch(objUrl(URLS.SEASON_STATUS, { season_id }), { credentials: "include" });
-    }
-    async getDate() {
-      const response = await this.fetch;
-      const json = await response.json();
-      return jsonCheck(json).result;
-    }
-    async toEpisodes() {
-      const res = await this.getDate();
-      return res.main_section.episodes.concat(...res.section.map((d) => d.episodes)).map((d) => {
-        d.ep_id = d.id;
-        d.episode_status = d.status;
-        d.index = d.title;
-        d.index_title = d.long_title;
-        d.premiere = Boolean(d.is_premiere);
-        return d;
-      });
-    }
-  };
-
   // src/io/api-season-status.ts
   init_tampermonkey();
   async function apiSeasonStatus(data) {
@@ -36959,8 +36934,11 @@ const MODULES = `
       this.pgc = true;
       location.href.replace(/[sS][sS]\\d+/, (d) => this.ssid = Number(d.substring(2)));
       location.href.replace(/[eE][pP]\\d+/, (d) => this.epid = Number(d.substring(2)));
+      this.followSeason();
       this.recommend();
       this.seasonCount();
+      this.season();
+      this.review();
       ((_a3 = user.userStatus.videoLimit) == null ? void 0 : _a3.status) && this.videoLimit();
       this.related();
       this.initialState();
@@ -36970,6 +36948,11 @@ const MODULES = `
       Header.primaryMenu();
       Header.banner();
       this.updateDom();
+    }
+    /** 获取csrf */
+    getCsrf() {
+      const match = document.cookie.match(/bili_jct=([^;]+)/);
+      return match ? match[1] : "";
     }
     /** 修复：末尾番剧推荐 */
     recommend() {
@@ -37003,6 +36986,218 @@ const MODULES = `
         } catch (e) {
         }
       }, true);
+    }
+    /** 修复追番按钮 */
+    followSeason() {
+      const originalFetch = window.fetch;
+      const self2 = this;
+      window.fetch = async function(input, init) {
+        var _a3, _b2;
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("bangumi.bilibili.com/follow/web_api/season/follow")) {
+          try {
+            let seasonId = "";
+            const urlObj2 = new URL(url, location.origin);
+            seasonId = urlObj2.searchParams.get("season_id") || "";
+            if (!seasonId && (init == null ? void 0 : init.body)) {
+              const bodyStr = init.body.toString();
+              const bodyParams = new URLSearchParams(bodyStr);
+              seasonId = bodyParams.get("season_id") || "";
+            }
+            if (!seasonId) {
+              seasonId = String(((_a3 = window.__INITIAL_STATE__) == null ? void 0 : _a3.ssId) || self2.ssid || "");
+            }
+            const csrf = self2.getCsrf();
+            const newUrl = \`https://api.bilibili.com/pgc/web/follow/add\`;
+            const newInit = {
+              ...init,
+              method: "POST",
+              credentials: "include",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+              },
+              body: new URLSearchParams({
+                season_id: seasonId,
+                csrf
+              }).toString()
+            };
+            return originalFetch.call(this, newUrl, newInit);
+          } catch (e) {
+          }
+        }
+        if (url.includes("bangumi.bilibili.com/follow/web_api/season/unfollow") || url.includes("bangumi.bilibili.com/follow/web_api/season/cancel")) {
+          try {
+            let seasonId = "";
+            const urlObj2 = new URL(url, location.origin);
+            seasonId = urlObj2.searchParams.get("season_id") || "";
+            if (!seasonId && (init == null ? void 0 : init.body)) {
+              const bodyParams = new URLSearchParams(init.body.toString());
+              seasonId = bodyParams.get("season_id") || "";
+            }
+            if (!seasonId) {
+              seasonId = String(((_b2 = window.__INITIAL_STATE__) == null ? void 0 : _b2.ssId) || self2.ssid || "");
+            }
+            const csrf = self2.getCsrf();
+            const newUrl = \`https://api.bilibili.com/pgc/web/follow/del\`;
+            const newInit = {
+              ...init,
+              method: "POST",
+              credentials: "include",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+              },
+              body: new URLSearchParams({
+                season_id: seasonId,
+                csrf
+              }).toString()
+            };
+            return originalFetch.call(this, newUrl, newInit);
+          } catch (e) {
+          }
+        }
+        return originalFetch.call(this, input, init);
+      };
+    }
+    // 同步追番状态到 INITIAL_STATE
+    async syncFollowState() {
+      var _a3, _b2, _c, _d;
+      try {
+        const seasonId = this.ssid || ((_b2 = (_a3 = window.__INITIAL_STATE__) == null ? void 0 : _a3.mediaInfo) == null ? void 0 : _b2.season_id);
+        if (!seasonId) return;
+        const res = await fetch(
+          \`https://api.bilibili.com/pgc/view/web/season/user/status?season_id=\${seasonId}\`,
+          { credentials: "include" }
+        );
+        const json = await res.json();
+        const follow = (_d = (_c = json == null ? void 0 : json.result) == null ? void 0 : _c.follow) != null ? _d : 0;
+        const t = window.__INITIAL_STATE__;
+        t.userStat.follow = follow;
+        t.seasonFollowed = follow === 1;
+      } catch (e) {
+      }
+    }
+    /** 修复换季时请求 502 */
+    season() {
+      xhrHook("bangumi.bilibili.com/view/web_api/season", (args) => {
+        args[1] = args[1].replace("bangumi.bilibili.com/view/web_api/season", "api.bilibili.com/pgc/view/web/season");
+      }, (r) => {
+        const bangumiResult = jsonCheck(r.response);
+        bangumiResult.result.episodes.forEach((e) => {
+          e.index_title = e.long_title;
+          e.index = e.title;
+        });
+        return r.responseType === "json" ? r.response = bangumiResult : r.response = r.responseText = JSON.stringify(bangumiResult);
+      }, false);
+    }
+    /** 修复点评数据，使用自 hmjz100 的commit 310cdae **/
+    review() {
+      xhrHook.async("bangumi.bilibili.com/review/web_api/media/play?media_id", void 0, async (args) => {
+        var _a3, _b2, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r;
+        const url = new URL(args[1], location.origin);
+        const mediaId = url.searchParams.get("media_id");
+        const info_f = await fetch(\`https://api.bilibili.com/pgc/review/user?media_id=\${mediaId}\`, { credentials: \`include\` });
+        const info = await info_f.json();
+        const short_f = await fetch(\`https://api.bilibili.com/pgc/review/short/list?media_id=\${mediaId}&ps=3&sort=0\`, { credentials: \`include\` });
+        const short = await short_f.json();
+        const long_f = await fetch(\`https://api.bilibili.com/pgc/review/long/list?media_id=\${mediaId}&ps=3&sort=0\`, { credentials: \`include\` });
+        const long = await long_f.json();
+        const feed_f = await fetch(\`https://api.bilibili.com/pgc/review/long/feed/pull?ps=5\`, { credentials: \`include\` });
+        const feed = await feed_f.json();
+        const feedList = ((_b2 = (_a3 = feed.data) == null ? void 0 : _a3.list) != null ? _b2 : []).slice(0, 3).map((item) => {
+          var _a4, _b3, _c2, _d2, _e2, _f2, _g2, _h2, _i2, _j2, _k2;
+          return {
+            article_id: item.article_id,
+            author: {
+              avatar: item.author.avatar,
+              mid: item.author.mid,
+              uname: item.author.uname,
+              vip: {
+                themeType: (_b3 = (_a4 = item.author.vip) == null ? void 0 : _a4.themeType) != null ? _b3 : 0,
+                vipStatus: (_d2 = (_c2 = item.author.vip) == null ? void 0 : _c2.vipStatus) != null ? _d2 : 0,
+                vipType: (_f2 = (_e2 = item.author.vip) == null ? void 0 : _e2.vipType) != null ? _f2 : 0
+              }
+            },
+            content: item.content,
+            media: {
+              cover: (_h2 = (_g2 = item.media) == null ? void 0 : _g2.cover) != null ? _h2 : "",
+              media_id: (_i2 = item.media) == null ? void 0 : _i2.media_id,
+              title: (_j2 = item.media) == null ? void 0 : _j2.title
+            },
+            review_id: item.review_id,
+            title: item.title,
+            user_rating: {
+              score: (_k2 = item.score) != null ? _k2 : 0
+            }
+          };
+        });
+        const longList = ((_d = (_c = long.data) == null ? void 0 : _c.list) != null ? _d : []).slice(0, 3).map((item) => {
+          var _a4, _b3, _c2, _d2, _e2, _f2, _g2;
+          return {
+            article_id: item.article_id,
+            author: {
+              avatar: item.author.avatar,
+              mid: item.author.mid,
+              uname: item.author.uname,
+              vip: {
+                themeType: (_b3 = (_a4 = item.author.vip) == null ? void 0 : _a4.themeType) != null ? _b3 : 0,
+                vipStatus: (_d2 = (_c2 = item.author.vip) == null ? void 0 : _c2.vipStatus) != null ? _d2 : 0,
+                vipType: (_f2 = (_e2 = item.author.vip) == null ? void 0 : _e2.vipType) != null ? _f2 : 0
+              }
+            },
+            content: item.content,
+            ctime: item.ctime,
+            mtime: item.mtime,
+            review_id: item.review_id,
+            title: item.title,
+            user_rating: {
+              score: (_g2 = item.score) != null ? _g2 : 0
+            }
+          };
+        });
+        const shortList = ((_f = (_e = short.data) == null ? void 0 : _e.list) != null ? _f : []).slice(0, 3).map((item) => {
+          var _a4, _b3, _c2, _d2, _e2, _f2, _g2;
+          return {
+            author: {
+              avatar: item.author.avatar,
+              mid: item.author.mid,
+              uname: item.author.uname,
+              vip: {
+                themeType: (_b3 = (_a4 = item.author.vip) == null ? void 0 : _a4.themeType) != null ? _b3 : 0,
+                vipStatus: (_d2 = (_c2 = item.author.vip) == null ? void 0 : _c2.vipStatus) != null ? _d2 : 0,
+                vipType: (_f2 = (_e2 = item.author.vip) == null ? void 0 : _e2.vipType) != null ? _f2 : 0
+              }
+            },
+            content: item.content,
+            ctime: item.ctime,
+            mtime: item.mtime,
+            review_id: item.review_id,
+            user_rating: {
+              score: (_g2 = item.score) != null ? _g2 : item.score
+            }
+          };
+        });
+        const response = {
+          code: 0,
+          message: "success",
+          result: {
+            feed: feedList,
+            long_review: {
+              list: longList,
+              total: (_h = (_g = long.data) == null ? void 0 : _g.count) != null ? _h : 0
+            },
+            rating: {
+              count: (_l = (_k = (_j = (_i = info.result) == null ? void 0 : _i.media) == null ? void 0 : _j.rating) == null ? void 0 : _k.count) != null ? _l : 0,
+              score: (_p = (_o = (_n = (_m = info.result) == null ? void 0 : _m.media) == null ? void 0 : _n.rating) == null ? void 0 : _o.score) != null ? _p : 0
+            },
+            short_review: {
+              list: shortList,
+              total: (_r = (_q = short.data) == null ? void 0 : _q.total) != null ? _r : 0
+            }
+          }
+        };
+        let res = JSON.stringify(response);
+        return { response: res, responseText: res, responseType: "json" };
+      }, false);
     }
     /** 解除区域限制（重定向模式） */
     videoLimit() {
@@ -37042,11 +37237,9 @@ const MODULES = `
     /** 初始化\`__INITIAL_STATE__\` */
     initialState() {
       const data = this.epid ? { ep_id: this.epid } : { season_id: this.ssid };
-      Promise.allSettled([apiBangumiSeason(data), apiSeasonStatus(data), new Promise((r) => poll(() => this.initilized, r))]).then((d) => d.map((d2) => d2.status === "fulfilled" && d2.value)).then(async (d) => {
-        var _a3;
+      Promise.allSettled([apiSeasonStatus(data), new Promise((r) => poll(() => this.initilized, r))]).then((d) => d.map((d2) => d2.status === "fulfilled" && d2.value)).then(async (d) => {
         const t = window.__INITIAL_STATE__;
-        const bangumi = d[0];
-        const status = d[1];
+        const status = d[0];
         if (status) {
           const i = status.progress ? status.progress.last_ep_id : -1, n = status.progress ? status.progress.last_ep_index : "", s = status.progress ? status.progress.last_time : 0, o = status.vip_info || {};
           !this.epid && i > 0 && (this.epid = i);
@@ -37073,66 +37266,10 @@ const MODULES = `
           user.userStatus.videoLimit.status || (t.area = this.limit);
           t.seasonFollowed = 1 === status.follow;
         }
-        if (bangumi) {
-          let loopTitle2 = function() {
-            poll(() => document.title != title, () => {
-              document.title = title;
-              if (document.title != title) loopTitle2();
-            });
-          };
-          var loopTitle = loopTitle2;
-          if (bangumi.season_id && bangumi.total_ep && !((_a3 = bangumi.episodes) == null ? void 0 : _a3[0])) {
-            await new ApiSeasonSection(bangumi.season_id).toEpisodes().then((d2) => {
-              bangumi.episodes = d2;
-            }).catch((e) => {
-              debug.warn("episodes数据获取出错", e);
-            });
-          }
-          const i = JSON.parse(JSON.stringify(bangumi));
-          delete i.episodes;
-          delete i.seasons;
-          delete i.up_info;
-          delete i.rights;
-          delete i.publish;
-          delete i.newest_ep;
-          delete i.rating;
-          delete i.pay_pack;
-          delete i.payment;
-          delete i.activity;
-          if (user.userStatus.bangumiEplist) delete i.bkg_cover;
-          user.userStatus.videoLimit.status && bangumi.rights && (bangumi.rights.watch_platform = 0);
-          t.mediaInfo = i;
-          t.mediaInfo.bkg_cover && (t.special = true);
-          t.ssId = bangumi.season_id || -1;
-          t.mdId = bangumi.media_id;
-          t.epInfo = this.epid && bangumi.episodes.find((d2) => d2.ep_id == this.epid) || bangumi.episodes[0] || {};
-          t.epList = bangumi.episodes || [];
-          t.seasonList = bangumi.seasons || [];
-          t.upInfo = bangumi.up_info || {};
-          t.rightsInfo = bangumi.rights || {};
-          t.app = 1 === t.rightsInfo.watch_platform;
-          t.pubInfo = bangumi.publish || {};
-          t.newestEp = bangumi.newest_ep || {};
-          t.mediaRating = bangumi.rating || {};
-          t.payPack = bangumi.pay_pack || {};
-          t.payMent = bangumi.payment || {};
-          t.activity = bangumi.activity || {};
-          t.epStat = this.setEpStat(t.epInfo.episode_status || t.mediaInfo.season_status, t.userStat.pay, t.userStat.payPackPaid, t.loginInfo);
-          t.epId = Number(this.epid || t.epInfo.ep_id);
-          this.ssid = t.ssId;
-          this.epid = t.epId;
-          if (t.upInfo.mid == /** Classic_Anime */
-          677043260 || t.upInfo.mid == /** Anime_Ongoing */
-          688418886) {
-            this.th = true;
-          }
-          const title = this.setTitle(t.epInfo.index, t.mediaInfo.title, this.Q(t.mediaInfo.season_type), true);
-          loopTitle2();
-          videoInfo.bangumiSeason(bangumi);
-        } else {
-          apiPgcSeason(data).then((bangumi2) => {
+        {
+          apiPgcSeason(data).then((bangumi) => {
             const t2 = window.__INITIAL_STATE__;
-            const status2 = bangumi2.user_status;
+            const status2 = bangumi.user_status;
             if (status2) {
               const i2 = status2.progress ? status2.progress.last_ep_id : -1, n = status2.progress ? status2.progress.last_ep_index : "", s = status2.progress ? status2.progress.last_time : 0, o = status2.vip_info || {};
               !this.epid && i2 > 0 && (this.epid = i2);
@@ -37157,8 +37294,12 @@ const MODULES = `
               this.limit = status2.area_limit || 0;
               user.userStatus.videoLimit.status || (t2.area = this.limit);
               t2.seasonFollowed = 1 === status2.follow;
+              setTimeout(() => {
+                var _a3;
+                return (_a3 = this.syncFollowState) == null ? void 0 : _a3.call(this);
+              }, 0);
             }
-            const i = JSON.parse(JSON.stringify(bangumi2));
+            const i = JSON.parse(JSON.stringify(bangumi));
             delete i.episodes;
             delete i.seasons;
             delete i.up_info;
@@ -37173,31 +37314,31 @@ const MODULES = `
             i.season_status = i.status;
             i.season_type = i.type;
             i.series_title = i.series.series_title;
-            i.total_ep = i.total !== -1 ? i.total : bangumi2.episodes.length;
+            i.total_ep = i.total !== -1 ? i.total : bangumi.episodes.length;
             if (user.userStatus.bangumiEplist) delete i.bkg_cover;
-            user.userStatus.videoLimit.status && bangumi2.rights && (bangumi2.rights.watch_platform = 0);
+            user.userStatus.videoLimit.status && bangumi.rights && (bangumi.rights.watch_platform = 0);
             t2.mediaInfo = i;
             t2.mediaInfo.bkg_cover && (t2.special = true);
-            t2.ssId = bangumi2.season_id || -1;
-            t2.mdId = bangumi2.media_id;
-            bangumi2.episodes.forEach((d2) => {
+            t2.ssId = bangumi.season_id || -1;
+            t2.mdId = bangumi.media_id;
+            bangumi.episodes.forEach((d2) => {
               d2.episode_status = d2.status;
               d2.index = d2.title;
               d2.index_title = d2.long_title;
               d2.page = 1;
               d2.premiere = false;
             });
-            t2.epInfo = this.epid && bangumi2.episodes.find((d2) => d2.ep_id == this.epid) || bangumi2.episodes[0] || {};
-            t2.epList = bangumi2.episodes || [];
-            t2.seasonList = bangumi2.seasons || [];
-            t2.upInfo = bangumi2.up_info || {};
-            t2.rightsInfo = bangumi2.rights || {};
+            t2.epInfo = this.epid && bangumi.episodes.find((d2) => d2.ep_id == this.epid) || bangumi.episodes[0] || {};
+            t2.epList = bangumi.episodes || [];
+            t2.seasonList = bangumi.seasons || [];
+            t2.upInfo = bangumi.up_info || {};
+            t2.rightsInfo = bangumi.rights || {};
             t2.app = 1 === t2.rightsInfo.watch_platform;
-            t2.pubInfo = bangumi2.publish || {};
-            t2.newestEp = bangumi2.new_ep || {};
-            t2.mediaRating = bangumi2.rating || {};
-            t2.payMent = bangumi2.payment || {};
-            t2.activity = bangumi2.activity || {};
+            t2.pubInfo = bangumi.publish || {};
+            t2.newestEp = bangumi.new_ep || {};
+            t2.mediaRating = bangumi.rating || {};
+            t2.payMent = bangumi.payment || {};
+            t2.activity = bangumi.activity || {};
             t2.epStat = this.setEpStat(t2.epInfo.episode_status || t2.mediaInfo.season_status, t2.userStat.pay, t2.userStat.payPackPaid, t2.loginInfo);
             t2.epId = Number(this.epid || t2.epInfo.ep_id);
             this.ssid = t2.ssId;
@@ -37208,14 +37349,14 @@ const MODULES = `
               this.th = true;
             }
             const title = this.setTitle(t2.epInfo.index, t2.mediaInfo.title, this.Q(t2.mediaInfo.season_type), true);
-            function loopTitle2() {
+            function loopTitle() {
               poll(() => document.title != title, () => {
                 document.title = title;
-                if (document.title != title) loopTitle2();
+                if (document.title != title) loopTitle();
               });
             }
-            loopTitle2();
-            videoInfo.bangumiSeason(bangumi2);
+            loopTitle();
+            videoInfo.bangumiSeason(bangumi);
           }).catch(() => {
             return this.initGlobal();
           });

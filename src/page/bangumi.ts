@@ -76,9 +76,11 @@ export class PageBangumi extends Page {
         this.pgc = true;
         location.href.replace(/[sS][sS]\d+/, d => this.ssid = <any>Number(d.substring(2)));
         location.href.replace(/[eE][pP]\d+/, d => this.epid = <any>Number(d.substring(2)));
+        this.followSeason();
         this.recommend();
         this.seasonCount();
         this.season();
+        this.review();
         user.userStatus!.videoLimit?.status && this.videoLimit();
         this.related();
         this.initialState();
@@ -89,6 +91,13 @@ export class PageBangumi extends Page {
         Header.banner();
         this.updateDom();
     }
+
+    /** 获取csrf */
+    protected getCsrf(): string {
+        const match = document.cookie.match(/bili_jct=([^;]+)/);
+        return match ? match[1] : '';
+    }
+
     /** 修复：末尾番剧推荐 */
     protected recommend() {
         xhrHook("api.bilibili.com/pgc/web/recommend/related/recommend", args => {
@@ -123,6 +132,103 @@ export class PageBangumi extends Page {
             } catch (e) { }
         }, true);
     }
+
+    /** 修复追番按钮 */
+    protected followSeason() {
+        const originalFetch = window.fetch;
+        const self = this;
+        window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
+            const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            
+            // 拦截追番接口
+            if (url.includes('bangumi.bilibili.com/follow/web_api/season/follow')) {
+                try {
+                    let seasonId = '';
+                    const urlObj = new URL(url, location.origin);
+                    seasonId = urlObj.searchParams.get('season_id') || '';
+                    if (!seasonId && init?.body) {
+                        const bodyStr = init.body.toString();
+                        const bodyParams = new URLSearchParams(bodyStr);
+                        seasonId = bodyParams.get('season_id') || '';
+                    }
+                    if (!seasonId) {
+                        seasonId = String((<any>window).__INITIAL_STATE__?.ssId || self.ssid || '');
+                    }
+                    const csrf = self.getCsrf();
+
+                    const newUrl = `https://api.bilibili.com/pgc/web/follow/add`;
+                    const newInit: RequestInit = {
+                        ...init,
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                        },
+                        body: new URLSearchParams({
+                            season_id: seasonId,
+                            csrf: csrf
+                        }).toString()
+                    };
+                    return originalFetch.call(this, newUrl, newInit);
+                } catch (e) {}
+            }
+            
+            // 拦截取消追番接口
+            if (url.includes('bangumi.bilibili.com/follow/web_api/season/unfollow') || 
+                url.includes('bangumi.bilibili.com/follow/web_api/season/cancel')) {
+                try {
+                    let seasonId = '';
+                    const urlObj = new URL(url, location.origin);
+                    seasonId = urlObj.searchParams.get('season_id') || '';
+                    if (!seasonId && init?.body) {
+                        const bodyParams = new URLSearchParams(init.body.toString());
+                        seasonId = bodyParams.get('season_id') || '';
+                    }
+                    if (!seasonId) {
+                        seasonId = String((<any>window).__INITIAL_STATE__?.ssId || self.ssid || '');
+                    }
+                    const csrf = self.getCsrf();
+                    
+                    const newUrl = `https://api.bilibili.com/pgc/web/follow/del`;
+                    const newInit: RequestInit = {
+                        ...init,
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                        },
+                        body: new URLSearchParams({
+                            season_id: seasonId,
+                            csrf: csrf
+                        }).toString()
+                    };
+                    return originalFetch.call(this, newUrl, newInit);
+                } catch (e) {}
+            }
+            
+            return originalFetch.call(this, input, init);
+        };
+    }
+    // 同步追番状态到 INITIAL_STATE
+    protected async syncFollowState() {
+        try {
+            const seasonId =
+                this.ssid ||
+                (<any>window).__INITIAL_STATE__?.mediaInfo?.season_id;
+            if (!seasonId) return;
+            const res = await fetch(
+                `https://api.bilibili.com/pgc/view/web/season/user/status?season_id=${seasonId}`,
+                { credentials: 'include' }
+            );
+            const json = await res.json();
+            const follow = json?.result?.follow ?? 0;
+            const t = (<any>window).__INITIAL_STATE__;
+            t.userStat.follow = follow;
+            t.seasonFollowed = follow === 1;
+        } catch (e) {
+        }
+    }
+
     /** 修复换季时请求 502 */ 
     protected season() {
         xhrHook("bangumi.bilibili.com/view/web_api/season", args => {
@@ -135,6 +241,112 @@ export class PageBangumi extends Page {
             });
             return r.responseType === "json" ? r.response = bangumiResult : r.response = r.responseText = JSON.stringify(bangumiResult);
         }, false);
+    }
+    /** 修复点评数据，使用自 hmjz100 的commit 310cdae **/
+    protected review() {
+        xhrHook.async('bangumi.bilibili.com/review/web_api/media/play?media_id', undefined, async (args) => {
+            const url = new URL(args[1], location.origin);
+            const mediaId = url.searchParams.get('media_id');
+            const info_f = await fetch(`https://api.bilibili.com/pgc/review/user?media_id=${mediaId}`, { credentials: `include` });
+            const info = await info_f.json();
+            const short_f = await fetch(`https://api.bilibili.com/pgc/review/short/list?media_id=${mediaId}&ps=3&sort=0`, { credentials: `include` });
+            const short = await short_f.json();
+            const long_f = await fetch(`https://api.bilibili.com/pgc/review/long/list?media_id=${mediaId}&ps=3&sort=0`, { credentials: `include` });
+            const long = await long_f.json();
+            const feed_f = await fetch(`https://api.bilibili.com/pgc/review/long/feed/pull?ps=5`, { credentials: `include` });
+            const feed = await feed_f.json();
+            const feedList = (feed.data?.list ?? [])
+                .slice(0, 3)
+                .map((item: any) => ({
+                    article_id: item.article_id,
+                    author: {
+                        avatar: item.author.avatar,
+                        mid: item.author.mid,
+                        uname: item.author.uname,
+                        vip: {
+                            themeType: item.author.vip?.themeType ?? 0,
+                            vipStatus: item.author.vip?.vipStatus ?? 0,
+                            vipType: item.author.vip?.vipType ?? 0
+                        }
+                    },
+                    content: item.content,
+                    media: {
+                        cover: item.media?.cover ?? '',
+                        media_id: item.media?.media_id,
+                        title: item.media?.title
+                    },
+                    review_id: item.review_id,
+                    title: item.title,
+                    user_rating: {
+                        score: item.score ?? 0
+                    }
+                }));
+            const longList = (long.data?.list ?? [])
+                .slice(0, 3)
+                .map((item: any) => ({
+                    article_id: item.article_id,
+                    author: {
+                        avatar: item.author.avatar,
+                        mid: item.author.mid,
+                        uname: item.author.uname,
+                        vip: {
+                            themeType: item.author.vip?.themeType ?? 0,
+                            vipStatus: item.author.vip?.vipStatus ?? 0,
+                            vipType: item.author.vip?.vipType ?? 0
+                        }
+                    },
+                    content: item.content,
+                    ctime: item.ctime,
+                    mtime: item.mtime,
+                    review_id: item.review_id,
+                    title: item.title,
+                    user_rating: {
+                        score: item.score ?? 0
+                    }
+                }));
+            const shortList = (short.data?.list ?? [])
+                .slice(0, 3)
+                .map((item: any) => ({
+                    author: {
+                        avatar: item.author.avatar,
+                        mid: item.author.mid,
+                        uname: item.author.uname,
+                        vip: {
+                            themeType: item.author.vip?.themeType ?? 0,
+                            vipStatus: item.author.vip?.vipStatus ?? 0,
+                            vipType: item.author.vip?.vipType ?? 0
+                        }
+                    },
+                    content: item.content,
+                    ctime: item.ctime,
+                    mtime: item.mtime,
+                    review_id: item.review_id,
+                    user_rating: {
+                        score: item.score ?? item.score
+                    }
+                }));
+            const response = {
+                code: 0,
+                message: 'success',
+                result: {
+                    feed: feedList,
+                    long_review: {
+                        list: longList,
+                        total: long.data?.count ?? 0
+                    },
+                    rating: {
+                        count: info.result?.media?.rating?.count ?? 0,
+                        score: info.result?.media?.rating?.score ?? 0
+                    },
+                    short_review: {
+                        list: shortList,
+                        total: short.data?.total ?? 0
+                    }
+                }
+            };
+            let res = JSON.stringify(response);
+            return { response: res, responseText: res, responseType: 'json' }
+        }, false)
     }
     /** 解除区域限制（重定向模式） */
     protected videoLimit() {
@@ -240,6 +452,7 @@ export class PageBangumi extends Page {
                                 this.limit = status.area_limit || 0;
                                 user.userStatus!.videoLimit.status || (t.area = this.limit);
                                 t.seasonFollowed = 1 === status.follow;
+                                setTimeout(() => this.syncFollowState?.(), 0);// 异步同步追番状态
                             }
                             const i = JSON.parse(JSON.stringify(bangumi));
                             delete i.episodes;
